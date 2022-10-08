@@ -1,0 +1,219 @@
+Phoenix liveView
+
+## Server-side features
+
+1.Assigns and hex templates
+  - All of the data in a LiveView is stored in the socket as assigns. 
+  - Those values can be accessed in the LiveView as "socket.assigns.name" but they are accessed inside LiveView templates as "@name".
+  - Phoenix template language is called HEEx (HTML+EEx)
+  - Those templates are either files with the .heex extension or they are created directly in source files via the ~H sigil.
+  - The ~H sigil for writing HEEx templates inside source files and provides:-
+      a. Built-in handling of HTML attributes.
+      b. An HTML-like notation for injecting function components.
+      c. Compile-time validation of the structure of the template.
+      d. The ability to minimize the amount of data sent over the wire.
+  - All layouts must call <%= @inner_content %> to inject the content rendered by the layout  
+
+2. Live navigation
+  - With live navigation, the page is updated without a full page reload. it can be triggered in two ways
+    a. From the client - this is done by passing either "patch={url}" or" navigate={url}" to the Phoenix.Component.link/1 component
+    b. From the server - this is done by by Phoenix.LiveView.push_patch/2 or Phoenix.LiveView.push_navigate/2.
+       example
+         normal - <.live href={~p"/pages/#{@page + 1}"}>Next</.live> -  HTTP based, work everywhere, and perform full page reloads
+         recomended - <.live navigate ={~p"/pages/#{@page + 1}"}>Next</.live> - work across LiveViews in the same session.
+         liveview -  <.link patch={...}> updates the current LiveView and sends only the minimal diff while also maintaining the scroll position  
+
+   -  handle_params/3 -  callback is invoked after mount/3 and before the initial render
+                      -  It is also invoked every time <.link patch={...}> or push_patch/2 are used
+                      -  It receives the request parameters as first argument, the url as second, and the socket as third.
+                - Remember you should never trust the received params, so you must use the callback to validate the user input and change the state accordingly i.e
+
+                 live "/users", UserTable    # table of users. router
+                 <.live patch={path(~p"/users", sort_by: "name")}>Sort by name</.link>    # sorting
+
+                 def handle_params(params, _uri, socket) do
+                    socket =
+                        case params["sort_by"] do
+                        sort_by when sort_by in ~w(name company) -> assign(socket, sort_by: sort_by)
+                        _ -> socket
+                        end
+
+                       {:noreply, load_users(socket)}
+                    end
+
+                :noreply means no additional information is sent to the client
+
+3.  Authentication vs authorization 
+     - Authentication is about identifying a user
+     - Authorization is about telling if a user has access to a certain resource or feature in the system.
+     - "mix phx.gen.auth" can generate the building blocks of an authentication system for you.
+     - In a regular web application, we perform authentication and authorization checks on every request.
+     - Authorization rules generally happen on mount and also on handle_event  eg a hook
+         
+         defmodule MyAppWeb.UserLiveAuth do
+            import Phoenix.LiveView
+
+            def on_mount(:default, _params, %{"user_id" => user_id} = _session, socket) do
+                socket = assign_new(socket, :current_user, fn ->
+                Accounts.get_user!(user_id)
+                end)
+
+                if socket.assigns.current_user.confirmed_at do
+                {:cont, socket}
+                else
+                {:halt, redirect(socket, to: "/login")}
+                end
+            end
+            end
+        
+        now we can use the above hook anywhere relevant
+
+        defmodule MyAppWeb.PageLive do
+            use MyAppWeb, :live_view
+            on_mount MyAppWeb.UserLiveAuth
+
+            ...
+            end
+
+     - live_session can also be used to enforce each LiveView group has a different root layout 
+     - you can even combine live_session with on_mount. Instead of declaring on_mount on every LiveView, you can declare it at the router level and it will enforce it on all LiveViews under it. eg
+               live_session :default, on_mount: MyAppWeb.UserLiveAuth do
+                    scope "/" do
+                        pipe_through [:authenticate_user]
+                        live ...
+                    end
+                    end
+
+                live_session :admin, on_mount: MyAppWeb.AdminLiveAuth do
+                    scope "/admin" do
+                        pipe_through [:authenticate_admin]
+                        live ...
+                    end
+                    end
+
+4. Uploads
+  - Accept specification - Define accepted file types, max number of entries, max file size, etc.
+  - Reactive entries - Uploads are populated in an "@uploads" assign in the socket.
+  - Drag and drop - Use the phx-drop-target attribute to enable.
+  - You enable an upload, typically on mount, eg 
+
+               @impl Phoenix.LiveView
+                    def mount(_params, _session, socket) do
+                    {:ok,
+                    socket
+                    |> assign(:uploaded_files, [])
+                    |> allow_upload(:avatar, accept: ~w(.jpg .jpeg), max_entries: 2)}
+                end  
+    * Render reactive elements 
+      - Important: You must bind "phx-submit" and "phx-change" on the form. eg
+                         <%# lib/my_app_web/live/upload_live.html.heex %>
+
+                        <form id="upload-form" phx-submit="save" phx-change="validate">
+                        <.live_file_input upload={@uploads.avatar} />
+                        <button type="submit">Upload</button>
+                        </form>
+
+## Client-Side Integration    
+
+1. Bindings
+      - Phoenix supports DOM element bindings for client-server interaction.
+      - all LiveView bindings are handled with the handle_event callback
+      examples 
+      click events - phx-click, phx-click-away, 
+      form events  - phx-change, phx-submit, phx-feedback-for, phx-disable-with, phx-trigger-action, phx-auto-recover
+      focus events - phx-blur, phx-focus, phx-window-blur, phx-window-focus
+      key events  - phx-keydown, phx-keyup, phx-window-keydown, phx-window-keyup, phx-key
+      DOM       -   phx-mounted, phx-update, phx-remove
+      JSINTEROP  -    phx-hook
+      Lifecycle events -  phx-mounted | phx-disconnected | phx-connected
+      rate limiting - phx-debounce, phx-throttle
+
+   #JS COMMANDS  
+     -  LiveView bindings support a JavaScript command interface via the "Phoenix.LiveView.JS" module, which allows you to specify utility operations that execute on the client when firing phx- binding events, such as phx-click, phx-change, etc
+     -  JS commands support a variety of utility operations for common client-side needs, such as adding or removing CSS classes, setting or removing tag attributes, showing or hiding content, and transitioning in and out with animations.
+     =================== example =============================
+
+     alias Phoenix.LiveView.JS
+
+        def hide_modal(js \\ %JS{}) do
+        js
+        |> JS.hide(transition: "fade-out", to: "#modal")
+        |> JS.hide(transition: "fade-out-scale", to: "#modal-content")
+        end
+
+        def modal(assigns) do
+        ~H"""
+        <div id="modal" class="phx-modal" phx-remove={hide_modal()}>
+            <div
+            id="modal-content"
+            class="phx-modal-content"
+            phx-click-away={hide_modal()}
+            phx-window-keydown={hide_modal()}
+            phx-key="escape"
+            >
+            <button class="phx-modal-close" phx-click={hide_modal()}>✖</button>
+            <p><%= @text %></p>
+            </div>
+        </div>
+        """
+        end
+
+        ============= example =========
+
+        alias Phoenix.LiveView.JS
+
+        <div phx-click={JS.push("inc", loading: ".thermo", target: @myself)}>+</div>
+
+    #FORM BINDINGS 
+       *Form events
+           - To handle form changes and submissions, use the "phx-change" and "phx-submit" events. 
+              =============== Example =====================
+              
+               <.form :let={f} for={@changeset} phx-change="validate" phx-submit="save">
+                    <%= label f, :username %>
+                    <%= text_input f, :username %>
+                    <%= error_tag f, :username %>
+
+                    <%= label f, :email %>
+                    <%= text_input f, :email %>
+                    <%= error_tag f, :email %>
+
+                    <%= submit "Save" %>
+                </.form>
+
+                =========== on handle_event callback =============
+                def handle_event("validate", %{"user" => params}, socket) do
+                    changeset =
+                        %User{}
+                        |> Accounts.change_user(params)
+                        |> Map.put(:action, :insert)
+
+                    {:noreply, assign(socket, changeset: changeset)}
+                end
+
+        * phx-feedback-for
+            - For proper form error tag updates, the error tag must specify which input it belongs to
+            -  specifies the name (or id, for backwards compatibility) of the input it belongs to  
+              ==============Example ===================
+
+              def error_tag(form, field) do
+                form.errors
+                |> Keyword.get_values(field)
+                |> Enum.map(fn error ->
+                    content_tag(:span, translate_error(error),
+                    class: "invalid-feedback",
+                    phx_feedback_for: input_name(form, field)
+                    )
+                end)
+              end  
+
+    # JAVASCRIPT INTEROPERABILITY (needs to be done again)
+     - To enable LiveView client/server interaction, we instantiate a LiveSocket.
+           =============Example =================
+
+            import {Socket} from "phoenix"
+            import {LiveSocket} from "phoenix_live_view"
+
+            let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+            let liveSocket = new LiveSocket("/live", Socket, {params: {_csrf_token: csrfToken}})
+            liveSocket.connect()
